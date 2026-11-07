@@ -1,0 +1,8 @@
+{
+  "port": 8650,
+  "amap_key": "YOUR_AMAP_KEY",
+  "data_dir": "data",
+  "cache_dir": "cache",
+  "mcp_python": "venv/bin/python",
+  "maps_client": ""
+}

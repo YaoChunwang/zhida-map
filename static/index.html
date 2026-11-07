@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>高铁火车可选路线图</title>
+<link rel="stylesheet" href="static/leaflet.css">
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #0f1a2e;
+    --panel2: #14213a;
+    --line: #1e3050;
+    --txt: #d7e3f4;
+    --txt-dim: #7d92b0;
+    --blue: #3b82f6;
+    --cyan: #22d3ee;
+    --green: #34d399;
+    --orange: #fbbf24;
+    --red: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  #map { position: absolute; inset: 0; background: var(--bg); }
+  .leaflet-container { background: var(--bg); font: inherit; outline: none; }
+  /* 高德亮色瓦片转暗色模式，配深色蓝调UI */
+  .leaflet-tile-pane { filter: invert(0.92) hue-rotate(180deg) brightness(0.82) saturate(0.65) contrast(0.92); }
+
+  /* ---- 城市点：canvas 渲染（340+ 城不卡），以下类仅供小站沿用 ---- */
+  /* transform-origin 0 0 + leaflet-zoom-animated：内容按 layer 坐标绘制，
+     pinch/缩放动画期间挂 Leaflet zoomanim 同步变换（见 JS cityTransformTo） */
+  .city-canvas { position: absolute; top: 0; left: 0; pointer-events: none; transform-origin: 0 0; }
+
+  /* ---- 小站点（"大珠小珠"层次：城市点 ~10px，小站点 ~4px，选中 ~7px） ---- */
+  .st-icon { background: transparent; border: none; }
+  .st-wrap { position: absolute; inset: 0; display: flex; align-items: center; gap: 5px; white-space: nowrap; transition: opacity .25s ease; }
+  /* 分级显隐：zoom 越大越只留重要站（JS applyZoomRules 按重要度分层），淡出不闪烁 */
+  .st-wrap.st-off { opacity: 0; pointer-events: none; }
+  .st-wrap.st-off .st-lbl { opacity: 0; }
+  .st-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #4d6a96; flex: none;
+    box-shadow: 0 0 4px 1px rgba(77,106,150,.45);
+    transform: scale(.57);   /* 基础可视 ~4px；盒子恒 7px，缩放不挪中心 */
+    transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+  }
+  .st-lbl {
+    font-size: 10px; color: var(--txt-dim); letter-spacing: .3px;
+    text-shadow: 0 0 5px #0b1220, 0 1px 3px #0b1220, 0 0 10px #0b1220;
+    pointer-events: none; user-select: none;
+    opacity: 0; transition: opacity .2s ease;
+  }
+  /* label：悬浮 或 7≤缩放<8 时显示（分级显隐见 JS applyZoomRules） */
+  .st-wrap:hover .st-lbl { opacity: 1; }
+  .st-wrap.show-lbl .st-lbl { opacity: 1; }
+  .st-wrap:hover .st-dot { background: var(--cyan); box-shadow: 0 0 6px 2px rgba(34,211,238,.6); }
+  .st-wrap.is-to .st-dot {
+    background: var(--cyan); transform: scale(1);   /* 选中放大到 7px（仍小于城市高亮） */
+    box-shadow: 0 0 8px 3px rgba(34,211,238,.75), 0 0 22px 8px rgba(34,211,238,.3);
+  }
+  .st-wrap.is-to .st-lbl { opacity: 1; color: var(--cyan); font-weight: 600; }
+
+  .leaflet-tooltip.arc-tip {
+    background: rgba(15,26,46,.94); border: 1px solid var(--line);
+    color: var(--txt); border-radius: 8px; padding: 6px 9px;
+    font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.5); white-space: nowrap;
+  }
+  .leaflet-tooltip.arc-tip::before { display: none; }
+  .arc-tip .est-tag { color: var(--orange); font-size: 10px; margin-left: 4px; }
+
+  /* ---- 顶部标题 ---- */
+  #title {
+    position: absolute; top: 14px; left: 14px; z-index: 1000;
+    background: rgba(15,26,46,.82); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 16px; backdrop-filter: blur(8px);
+    box-shadow: 0 8px 30px rgba(0,0,0,.45);
+  }
+  #title h1 { font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+  #title h1 .accent { color: var(--cyan); }
+  #title p { font-size: 11px; color: var(--txt-dim); margin-top: 3px; }
+
+  /* ---- 可直达城市/站点列表 ---- */
+  #directBox {
+    position: absolute; top: 92px; left: 14px; z-index: 1000;
+    width: 224px; max-height: calc(100vh - 210px);
+    background: rgba(15,26,46,.88); border: 1px solid var(--line); border-radius: 12px;
+    backdrop-filter: blur(8px); box-shadow: 0 8px 30px rgba(0,0,0,.45);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  #directBox.show { display: flex; }
+  .db-head {
+    padding: 9px 13px; font-size: 12px; color: var(--txt-dim);
+    border-bottom: 1px solid var(--line); flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .db-head b { color: var(--cyan); font-size: 14px; }
+  .db-list { overflow-y: auto; padding: 5px 0; -webkit-overflow-scrolling: touch; }
+  .db-item {
+    padding: 7px 13px; cursor: pointer; display: flex; align-items: baseline; gap: 8px;
+    border-left: 2px solid transparent;
+  }
+  .db-item:hover { background: rgba(59,130,246,.12); border-left-color: var(--blue); }
+  .db-item .nm { font-size: 13px; font-weight: 600; flex: none; min-width: 52px; }
+  .db-item .info { font-size: 11px; color: var(--txt-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .db-item .info .fast { color: var(--cyan); }
+  .db-item .info .pr { color: var(--green); }
+  .db-item .info .est { color: var(--orange); font-size: 9px; }
+  .db-item.pending { opacity: .45; cursor: default; }
+  .db-item .nm.st-nm { color: var(--txt-dim); font-weight: 500; }
+  /* 城市 / 全部站点 切换 */
+  .db-tabs { display: flex; gap: 6px; padding: 7px 13px 0; flex: none; }
+  .db-tab {
+    flex: 1; text-align: center; padding: 5px 6px; font-size: 11px; cursor: pointer;
+    background: rgba(59,130,246,.08); border: 1px solid var(--line); border-radius: 8px;
+    color: var(--txt-dim); user-select: none;
+  }
+  .db-tab.active {
+    background: rgba(34,211,238,.14); border-color: rgba(34,211,238,.5);
+    color: var(--cyan); font-weight: 600;
+  }
+  .db-scan {
+    padding: 5px 13px; font-size: 10.5px; color: var(--orange); flex: none;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .db-scan .mini-spin {
+    width: 9px; height: 9px; border: 2px solid rgba(251,191,36,.3);
+    border-top-color: var(--orange); border-radius: 50%;
+    animation: spin .9s linear infinite; flex: none;
+  }
+
+  /* ---- 右侧面板 / 移动端抽屉 ---- */
+  #panel {
+    position: absolute; top: 0; right: 0; height: 100%; width: 420px; max-width: 92vw;
+    background: linear-gradient(180deg, var(--panel), var(--panel2));
+    border-left: 1px solid var(--line); z-index: 1100;
+    transform: translateX(102%); transition: transform .28s ease;
+    display: flex; flex-direction: column;
+    box-shadow: -12px 0 40px rgba(0,0,0,.5);
+  }
+  #panel.open { transform: translateX(0); }
+  .p-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--line); flex: none; }
+  .p-route { display: flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 700; }
+  .p-route .arrow { color: var(--cyan); }
+  .p-close {
+    margin-left: auto; background: none; border: 1px solid var(--line); color: var(--txt-dim);
+    border-radius: 8px; width: 30px; height: 30px; cursor: pointer; font-size: 15px; line-height: 1;
+  }
+  .p-close:hover { color: var(--txt); border-color: var(--txt-dim); }
+  .p-ctrl { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+  .p-ctrl input[type=date] {
+    background: var(--bg); border: 1px solid var(--line); color: var(--txt);
+    border-radius: 8px; padding: 7px 10px; font-size: 13px; flex: 1; min-width: 0;
+    color-scheme: dark;
+  }
+  .btn {
+    background: rgba(59,130,246,.14); border: 1px solid rgba(59,130,246,.45);
+    color: var(--blue); border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { background: rgba(59,130,246,.28); }
+  .btn:disabled { opacity: .35; cursor: default; }
+
+  .p-body { overflow-y: auto; padding: 14px 20px 26px; flex: 1; -webkit-overflow-scrolling: touch; }
+
+  .card {
+    background: rgba(59,130,246,.08); border: 1px solid rgba(59,130,246,.22);
+    border-radius: 12px; padding: 13px 15px; margin-bottom: 13px;
+  }
+  .card .tag { font-size: 11px; color: var(--txt-dim); margin-bottom: 7px; }
+  .est-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .est-item .v { font-size: 16px; font-weight: 700; color: var(--cyan); }
+  .est-item .k { font-size: 11px; color: var(--txt-dim); margin-top: 2px; }
+
+  .summary {
+    display: flex; gap: 8px; font-size: 12px; color: var(--txt-dim);
+    margin: 4px 0 11px; flex-wrap: wrap;
+  }
+  .summary b { color: var(--txt); font-weight: 600; }
+
+  .filter-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--txt-dim); margin-bottom: 9px; cursor: pointer; user-select: none; }
+  .filter-row input { accent-color: var(--blue); width: 15px; height: 15px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel2); color: var(--txt-dim);
+    text-align: left; padding: 8px 7px; border-bottom: 1px solid var(--line);
+    font-weight: 500; cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { color: var(--txt); }
+  thead th .sort-ind { font-size: 9px; color: var(--blue); }
+  tbody td { padding: 9px 7px; border-bottom: 1px solid rgba(30,48,80,.55); vertical-align: top; }
+  tbody tr:hover { background: rgba(59,130,246,.07); }
+  .train-code {
+    font-weight: 700; color: var(--cyan); font-size: 13px;
+    background: rgba(34,211,238,.1); border: 1px solid rgba(34,211,238,.28);
+    padding: 1px 7px; border-radius: 6px; white-space: nowrap;
+  }
+  .sub { color: var(--txt-dim); font-size: 11px; margin-top: 3px; white-space: nowrap; }
+  .time-big { font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .seat-line { white-space: nowrap; margin-top: 2px; }
+  .st-ok { color: var(--green); }
+  .st-few { color: var(--orange); }
+  .st-no { color: var(--red); }
+  .price { color: var(--txt); font-weight: 600; }
+
+  .status-box {
+    border: 1px dashed var(--line); border-radius: 12px; padding: 22px 16px;
+    text-align: center; color: var(--txt-dim); font-size: 13px; margin: 10px 0;
+  }
+  .status-box.err { border-color: rgba(248,113,113,.4); color: var(--red); }
+  .spinner {
+    width: 22px; height: 22px; border: 3px solid rgba(59,130,246,.25);
+    border-top-color: var(--blue); border-radius: 50%;
+    animation: spin 0.9s linear infinite; margin: 0 auto 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- 中转方案 ---- */
+  .tf-tabs { display: flex; gap: 8px; margin: 10px 0 13px; }
+  .tf-tab {
+    flex: 1; text-align: center; padding: 8px 10px; font-size: 13px; cursor: pointer;
+    background: rgba(59,130,246,.08); border: 1px solid var(--line); border-radius: 9px;
+    color: var(--txt-dim); user-select: none;
+  }
+  .tf-tab.active {
+    background: rgba(34,211,238,.14); border-color: rgba(34,211,238,.5);
+    color: var(--cyan); font-weight: 600;
+  }
+  .tf-card {
+    background: rgba(59,130,246,.08); border: 1px solid rgba(59,130,246,.22);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 11px;
+  }
+  .tf-top {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--txt-dim); margin-bottom: 9px;
+  }
+  .tf-top .total-t { font-size: 15px; font-weight: 700; color: var(--cyan); }
+  .tf-top .total-p { font-size: 15px; font-weight: 700; color: var(--green); }
+  .tf-leg {
+    display: flex; align-items: baseline; gap: 8px; padding: 6px 0;
+    border-top: 1px dashed rgba(30,48,80,.8); font-size: 12.5px;
+  }
+  .tf-leg .tm { font-weight: 600; white-space: nowrap; }
+  .tf-leg .stn { color: var(--txt-dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tf-mid {
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 0 5px 2px; font-size: 11.5px; color: var(--orange);
+  }
+  .tf-mid .hub { color: var(--txt); font-weight: 600; }
+
+  .hint {
+    position: absolute; bottom: 18px; left: 14px; z-index: 1000;
+    background: rgba(15,26,46,.8); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 13px; font-size: 12px; color: var(--txt-dim); backdrop-filter: blur(8px);
+    max-width: 62vw;
+  }
+  .hint b { color: var(--cyan); }
+
+  /* 缩放控件（P3）：底部右侧，不挡直达面板/提示条/抽屉；
+     右侧面板打开时左移让位，手机抽屉打开时上移让位（见 JS 的 --zoom-lift） */
+  .leaflet-control-zoom { border: 1px solid var(--line) !important; border-radius: 9px; overflow: hidden; }
+  .leaflet-control-zoom a {
+    background: rgba(15,26,46,.9) !important; color: var(--txt) !important;
+    border-bottom: 1px solid var(--line) !important; width: 32px; height: 32px; line-height: 32px;
+  }
+  .leaflet-control-zoom a:hover { background: rgba(59,130,246,.28) !important; color: #fff !important; }
+  .leaflet-bottom.leaflet-right .leaflet-control-zoom {
+    margin-right: 14px; margin-bottom: calc(18px + var(--zoom-lift, 0px));
+    transition: margin .25s ease;
+  }
+  #map.panel-open .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-right: 434px; }
+  .leaflet-control-attribution { background: rgba(11,18,32,.7) !important; color: var(--txt-dim) !important; font-size: 9px; }
+  .leaflet-control-attribution a { color: var(--txt-dim) !important; }
+
+  /* 移动端：底部抽屉 */
+  @media (max-width: 720px) {
+    #title { top: 10px; left: 10px; right: 10px; padding: 9px 13px; }
+    #title h1 { font-size: 14px; }
+    #directBox {
+      top: auto; bottom: 100px; left: 10px; right: 64px; width: auto;
+      max-height: 30vh;
+    }
+    #panel {
+      top: auto; bottom: 0; left: 0; right: 0; width: 100%; max-width: 100%; height: auto;
+      max-height: 62vh; border-left: none; border-top: 1px solid var(--line);
+      border-radius: 18px 18px 0 0;
+      transform: translateY(102%);
+    }
+    #panel.open { transform: translateY(0); }
+    .p-head { padding: 14px 16px 10px; }
+    .p-body { padding: 12px 16px 22px; }
+    .hint { display: none; }
+    #map.panel-open .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-right: 10px; }
+    .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-right: 10px; margin-bottom: calc(104px + var(--zoom-lift, 0px)); }
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="title">
+  <h1>高铁火车<span class="accent">可选路线图</span></h1>
+  <p>点城市选出发地 → 看真实可直达城市/站点 → 再点目的地查真实车次 / 中转方案</p>
+</div>
+
+<div id="directBox">
+  <div class="db-head"><span>可直达 <b id="dbCount">0</b> <span id="dbUnit">城</span></span><span id="dbNote"></span></div>
+  <div class="db-tabs">
+    <div class="db-tab active" id="tabCities">城市</div>
+    <div class="db-tab" id="tabStations">全部站点 <span id="dbStCount"></span></div>
+  </div>
+  <div class="db-scan" id="dbScan" style="display:none"><span class="mini-spin"></span><span id="dbScanTxt">经停库建设中 0/0</span></div>
+  <div class="db-list" id="dbList"></div>
+</div>
+
+<div class="hint" id="hint">点一个城市作为<b>出发地</b>，查看<b>真实可直达城市/站点</b>，再点目的地查看 <b>12306 实时方案与票价</b></div>
+
+<div id="panel">
+  <div class="p-head">
+    <div class="p-route">
+      <span id="pFrom">—</span><span class="arrow">→</span><span id="pTo">—</span>
+      <button class="p-close" id="btnClose" title="关闭">✕</button>
+    </div>
+    <div class="p-ctrl">
+      <input type="date" id="dateInput">
+      <button class="btn" id="btnSwap">⇄ 换向</button>
+    </div>
+  </div>
+  <div class="p-body" id="pBody"></div>
+</div>
+
+<script src="static/leaflet.js"></script>
+<script>
+/* ============ 城市数据（/api/cities，342 城，含省份/分级） ============ */
+let CITIES = [];                 // [{name, province, tier, lat, lng}]
+let CITY_MAP = {};
+const CORRIDORS = [
+  ["北京","天津","济南","徐州","南京","常州","无锡","苏州","上海"],   // 京沪
+  ["北京","石家庄","郑州","武汉","长沙","株洲","广州","深圳"],         // 京广
+  ["上海","杭州","金华","南昌","长沙","贵阳","昆明"],                  // 沪昆
+  ["徐州","郑州","洛阳","西安","兰州"],                               // 徐兰
+  ["兰州","西宁","乌鲁木齐"],                                        // 兰新
+  ["北京","沈阳","长春","哈尔滨"],                                    // 京哈
+  ["上海","南京","合肥","武汉","宜昌","重庆","成都"],                  // 沪汉蓉
+  ["广州","南宁","昆明"],                                            // 广昆
+  ["杭州","宁波","温州","福州","厦门","深圳"]                         // 杭深
+];
+
+/* ============ WGS-84 -> GCJ-02 纠偏（高德瓦片是 GCJ-02） ============ */
+const _PI = Math.PI, _A = 6378245.0, _EE = 0.00669342162296594323;
+function outOfChina(lat, lng) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+}
+function _tfLat(x, y) {
+  let r = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  r += (20 * Math.sin(6 * x * _PI) + 20 * Math.sin(2 * x * _PI)) * 2 / 3;
+  r += (20 * Math.sin(y * _PI) + 40 * Math.sin(y / 3 * _PI)) * 2 / 3;
+  r += (160 * Math.sin(y / 12 * _PI) + 320 * Math.sin(y * _PI / 30)) * 2 / 3;
+  return r;
+}
+function _tfLng(x, y) {
+  let r = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  r += (20 * Math.sin(6 * x * _PI) + 20 * Math.sin(2 * x * _PI)) * 2 / 3;
+  r += (20 * Math.sin(x * _PI) + 40 * Math.sin(x / 3 * _PI)) * 2 / 3;
+  r += (150 * Math.sin(x / 12 * _PI) + 300 * Math.sin(x / 30 * _PI)) * 2 / 3;
+  return r;
+}
+function wgs2gcj(lat, lng) {
+  if (outOfChina(lat, lng)) return [lat, lng];
+  let dLat = _tfLat(lng - 105.0, lat - 35.0);
+  let dLng = _tfLng(lng - 105.0, lat - 35.0);
+  const radLat = lat / 180 * _PI;
+  let m = Math.sin(radLat);
+  m = 1 - _EE * m * m;
+  const sq = Math.sqrt(m);
+  dLat = (dLat * 180) / ((_A * (1 - _EE)) / (m * sq) * _PI);
+  dLng = (dLng * 180) / (_A / sq * Math.cos(radLat) * _PI);
+  return [lat + dLat, lng + dLng];
+}
+/* 所有渲染坐标统一走 gj()：输入 WGS-84 [lat,lng]，输出 GCJ-02 [lat,lng] */
+const gj = p => wgs2gcj(p[0], p[1]);
+
+/* ============ 地图（P4：平滑无极缩放） ============ */
+const map = L.map("map", {
+  zoomControl: false, attributionControl: true,
+  minZoom: 2, maxZoom: 18, worldCopyJump: false,
+  zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 150,
+  scrollWheelZoom: true, touchZoom: true, bounceAtZoomLimits: false
+}).setView(gj([32.5, 112]), 5);
+L.control.zoom({ position: "bottomright" }).addTo(map);
+
+L.tileLayer("https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}", {
+  attribution: "© 高德地图", subdomains: ["1", "2", "3", "4"], maxZoom: 18, updateWhenIdle: false
+}).addTo(map);
+// 底图失败也不影响界面（城市点与连线都是矢量层）
+
+/* 折线统一走 canvas 渲染器（340+ 条线不卡） */
+const lineRenderer = L.canvas({ padding: 0.6 });
+
+/* 走廊装饰线 */
+function drawCorridors() {
+  for (const seq of CORRIDORS) {
+    const pts = seq.map(n => CITY_MAP[n]).filter(Boolean).map(c => gj([c.lat, c.lng]));
+    if (pts.length > 1) L.polyline(pts, { color: "#2a4570", weight: 1.6, opacity: 0.55, dashArray: "1 7", lineCap: "round", renderer: lineRenderer }).addTo(map);
+  }
+}
+
+/* ============ 估算（回退用） ============ */
+function haversine(a, b) {
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+function estimate(a, b) {
+  const railKm = haversine(a, b) * 1.25;
+  const hours = railKm / 210 + 0.5;
+  const price2 = railKm * 0.5;
+  return { railKm, hours, price2 };
+}
+function fmtDur(min) {
+  return Math.floor(min / 60) + "h" + String(min % 60).padStart(2, "0") + "m";
+}
+function fmtDurCN(min) {
+  const t = Math.round(min);
+  return Math.floor(t / 60) + "小时" + String(t % 60).padStart(2, "0") + "分";
+}
+const estTag = '<span class="est-tag">· 估算</span>';
+
+/* 折线拆段：相邻经停站直线距离 >300km 视为站名匹配错误，断开该段，绝不拉长直线硬连 */
+function splitPath(pts) {
+  const segs = [];
+  let cur = [];
+  for (let i = 0; i < pts.length; i++) {
+    if (i > 0) {
+      const a = { lat: pts[i - 1][0], lng: pts[i - 1][1] }, b = { lat: pts[i][0], lng: pts[i][1] };
+      if (haversine(a, b) > 300) {
+        if (cur.length > 1) segs.push(cur);
+        cur = [];
+      }
+    }
+    cur.push(pts[i]);
+  }
+  if (cur.length > 1) segs.push(cur);
+  return segs;
+}
+
+/* ============ 状态 ============ */
+let selFrom = null, selTo = null;      // 城市对象 或 小站对象（isStation）
+let directData = null;                 // /api/direct 返回 {from, date, cities:[...]}
+let stationsData = null;               // /api/stations 返回 {stations, paths, progress}
+let transferPlans = null;              // /api/transfer 返回
+let transferTab = "time";              // time | price
+let listMode = "city";                 // city | station（左侧列表模式）
+const stMarkers = {};                  // 站名 -> marker（小站）
+let stTop20 = 0, stTop60 = 0;          // 重要度分级阈值（前 ~20% / 前 ~60%）
+let lineLayer = L.layerGroup().addTo(map);     // A-各城 可直达线
+let pathLayer = L.layerGroup().addTo(map);     // 真实铁路走向线（穿过小站）
+let stationLayer = L.layerGroup().addTo(map);  // 小站点图层（按重要度分级显隐，见 applyZoomRules）
+let pairLayer = L.layerGroup().addTo(map);     // A-B 高亮层
+let pollTimer = null, stPollTimer = null, progTimer = null;
+
+/* ============ 城市点图层（canvas：342 城全显不卡） ============ */
+const cityPane = map.createPane("cityPane");
+cityPane.style.zIndex = 450;
+cityPane.style.pointerEvents = "none";
+const cityCanvas = document.createElement("canvas");
+cityCanvas.className = "city-canvas";
+cityPane.appendChild(cityCanvas);
+const cityCtx = cityCanvas.getContext("2d");
+
+function cityStyle(c) {
+  // 返回 [半径, 颜色, 光晕, 透明度]
+  const isFrom = selFrom && selFrom.name === c.name && !selFrom.isStation;
+  const isTo = selTo && !selTo.isStation && selTo.name === c.name;
+  // 半径：城市点整体 ~85% 收小（醒目保持），与小站点(~4px)拉开"大珠小珠"层次
+  if (isFrom) return [7, "#3b82f6", "rgba(59,130,246,.85)", 1];
+  if (isTo) return [7, "#22d3ee", "rgba(34,211,238,.85)", 1];
+  if (selFrom && directData) {
+    const item = directItem(c.name);
+    const dim = !item || item.pending || !item.has_direct;
+    if (dim) return [3.8, "#41536e", null, 0.32];
+  }
+  return [5, "#3b82f6", "rgba(59,130,246,.55)", 1];
+}
+/* 城市名标签去重：底图自带城市注记，只画有交互语义的标签
+   （出发地 / 目的地 / 鼠标悬浮），其余城市只留圆点（亮暗已表达可达性） */
+let cityHover = null;
+function labelCity(c) {
+  return (!!selFrom && !selFrom.isStation && selFrom.name === c.name) ||
+         (!!selTo && !selTo.isStation && selTo.name === c.name) ||
+         cityHover === c.name;
+}
+
+/* —— canvas 同步核心 ——
+   画布挂在 mapPane 内、内容按 layer 坐标绘制（与 marker/瓦片同坐标系）：
+   拖动 = mapPane 平移，画布自带对齐、无需重绘；
+   pinch/缩放动画期间由 cityTransformTo 挂 Leaflet zoomanim/zoom 事件做
+   scale+translate 插值 —— 与 Leaflet Canvas renderer（折线层）同款机制。 */
+function drawCityLayer() {
+  if (map._animatingZoom) { cityDrawPending = true; return; }   // 缩放动画中不换基，结束后全量重绘
+  cityDrawPending = false;
+  const dpr = window.devicePixelRatio || 1;
+  const size = map.getSize();
+  if (cityCanvas.width !== size.x * dpr || cityCanvas.height !== size.y * dpr) {
+    cityCanvas.width = size.x * dpr;
+    cityCanvas.height = size.y * dpr;
+    cityCanvas.style.width = size.x + "px";
+    cityCanvas.style.height = size.y + "px";
+  }
+  const ctx = cityCtx;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size.x, size.y);
+
+  // 记录本次绘制基（zoom + pixelOrigin），供 cityTransformTo 插值换算；同时导出坐标供测试断言
+  cityDrawnZoom = map.getZoom();
+  cityDrawnOrigin = map.getPixelOrigin().clone();
+  const dbg = (window.__cityDebug = window.__cityDebug || {});
+  dbg.drawn = {}; dbg.drawCount = (dbg.drawCount || 0) + 1;
+  dbg.basis = { zoom: cityDrawnZoom, origin: [cityDrawnOrigin.x, cityDrawnOrigin.y] };
+
+  // 1) 点（全部城市）—— layer 坐标即画布坐标（画布位于 mapPane 原点）
+  const pts = [];
+  for (const c of CITIES) {
+    const p = map.latLngToLayerPoint(gj([c.lat, c.lng]));
+    if (p.x < -40 || p.y < -40 || p.x > size.x + 40 || p.y > size.y + 40) continue;
+    pts.push([c, p]);
+    dbg.drawn[c.name] = { x: p.x, y: p.y };
+    const [r, color, glow, alpha] = cityStyle(c);
+    ctx.globalAlpha = alpha;
+    if (glow) {
+      const g = ctx.createRadialGradient(p.x, p.y, r * 0.3, p.x, p.y, r * 3.2);
+      g.addColorStop(0, glow.replace(/[\d.]+\)$/, "0.5)"));
+      g.addColorStop(1, glow.replace(/[\d.]+\)$/, "0)"));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.2, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 2 * Math.PI); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // 2) 标签：只画有交互语义的（出发地/目的地/悬浮），其余靠底图注记，避免重复
+  dbg.labels = [];
+  for (const [c, p] of pts) {
+    if (!labelCity(c)) continue;
+    const isFrom = selFrom && selFrom.name === c.name && !selFrom.isStation;
+    const isTo = selTo && !selTo.isStation && selTo.name === c.name;
+    ctx.font = (isFrom || isTo ? "600 12px " : "12px ") + "-apple-system, 'PingFang SC', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "#0b1220"; ctx.shadowBlur = 6;
+    ctx.fillStyle = isFrom ? "#3b82f6" : isTo ? "#22d3ee" : "#d7e3f4";
+    ctx.fillText(c.name, p.x + 7, p.y);
+    ctx.shadowBlur = 0;
+    dbg.labels.push(c.name);
+  }
+
+  // 重绘即回到"当前基 + 单位变换"
+  cityTransformTo(map.getPixelOrigin(), map.getZoom());
+}
+let cityRaf = null, cityDrawPending = false;
+let cityDrawnZoom = null, cityDrawnOrigin = null;
+function scheduleCityDraw() {
+  if (cityRaf) return;
+  cityRaf = requestAnimationFrame(() => { cityRaf = null; drawCityLayer(); });
+}
+function forceCityDraw() {
+  // 同步全量重绘（zoom/move 结束必须立即归位，防残影/幽灵）
+  if (cityRaf) { cancelAnimationFrame(cityRaf); cityRaf = null; }
+  drawCityLayer();
+}
+/* zoom 插值同步：把"绘制基"（cityDrawnZoom/cityDrawnOrigin）下的画布内容
+   变换到目标视图：s = 2^(Δzoom)，off = s·O_drawn − O_target。
+   恒有 render = panePos + off + s·L_drawn = latLngToContainerPoint（当前），即全程贴底图。 */
+function cityTransformTo(targetOrigin, targetZoom) {
+  if (!cityDrawnOrigin) return;
+  const s = map.getZoomScale(targetZoom, cityDrawnZoom);
+  const off = cityDrawnOrigin.clone().multiplyBy(s).subtract(targetOrigin);
+  L.DomUtil.setTransform(cityCanvas, off, s);
+}
+map.on("zoomanim", e => {
+  // 缩放动画（setZoom/fitBounds/捏合松手）：先挂目标变换，CSS transition 平滑过渡
+  cityTransformTo(map._getNewPixelOrigin(e.center, e.zoom), e.zoom);
+});
+map.on("zoom", () => {
+  // pinch 逐帧 / 非动画 zoom：pixelOrigin 已更新，逐帧跟随
+  if (!map._animatingZoom) cityTransformTo(map.getPixelOrigin(), map.getZoom());
+});
+map.on("zoomend moveend viewreset resize", forceCityDraw);
+
+/* 城市点击命中（canvas 无 DOM 事件，按屏幕距离命中） */
+function cityAtPoint(pt) {
+  const lp = map.containerPointToLayerPoint(pt);
+  let best = null, bestD = 16;
+  for (const c of CITIES) {
+    const p = map.latLngToLayerPoint(gj([c.lat, c.lng]));
+    const d = Math.hypot(p.x - lp.x, p.y - lp.y);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+map.on("click", e => {
+  const c = cityAtPoint(e.containerPoint);
+  if (c) onCityClick(c);
+});
+map.on("mousemove", e => {
+  const c = cityAtPoint(e.containerPoint);
+  map.getContainer().style.cursor = c ? "pointer" : "";
+  const nm = c ? c.name : null;
+  if (nm !== cityHover) { cityHover = nm; scheduleCityDraw(); }   // 悬浮城市显示名字标签
+});
+map.on("mouseout", () => {
+  if (cityHover !== null) { cityHover = null; scheduleCityDraw(); }
+});
+
+function directItem(name) {
+  return directData && directData.cities && directData.cities.find(x => x.city === name);
+}
+
+function refreshMarkerStyles() {
+  for (const [name, o] of Object.entries(stMarkers)) {
+    const el = o.marker.getElement();
+    if (!el) continue;
+    const wrap = el.querySelector(".st-wrap");
+    if (!wrap) continue;
+    wrap.classList.toggle("is-to", !!(selTo && selTo.isStation && selTo.name === name));
+  }
+  scheduleCityDraw();
+}
+
+/* 二次贝塞尔弧线（无真实折线时的回退） */
+function arcPoints(a, b) {
+  const latlng1 = [a.lat, a.lng], latlng2 = [b.lat, b.lng];
+  const mx = (a.lat + b.lat) / 2, my = (a.lng + b.lng) / 2;
+  const dx = b.lat - a.lat, dy = b.lng - a.lng;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const cx = mx + (-dy / len) * len * 0.18, cy = my + (dx / len) * len * 0.18;
+  const pts = [];
+  for (let i = 0; i <= 28; i++) {
+    const t = i / 28, u = 1 - t;
+    pts.push([u * u * latlng1[0] + 2 * u * t * cx + t * t * latlng2[0],
+              u * u * latlng1[1] + 2 * u * t * cy + t * t * latlng2[1]]);
+  }
+  return pts;
+}
+
+/* 画折线（统一 GCJ 纠偏 + >300km 拆段） */
+function drawPolyline(pts, opts, tooltip) {
+  for (const seg of splitPath(pts)) {
+    const pl = L.polyline(seg.map(gj), Object.assign({ renderer: lineRenderer }, opts));
+    if (tooltip) pl.bindTooltip(tooltip, { className: "arc-tip", sticky: true });
+    pl.addTo(opts._layer || lineLayer);
+  }
+}
+
+/* ============ 可直达连线 ============ */
+function drawLines() {
+  lineLayer.clearLayers();
+  if (!selFrom) return;
+  if (!directData) { drawEstimateArcs(); return; }
+  for (const c of CITIES) {
+    if (c.name === selFrom.name) continue;
+    const item = directItem(c.name);
+    if (!item || item.pending || !item.has_direct) continue;
+    const isTo = selTo && !selTo.isStation && c.name === selTo.name;
+    const durTxt = item.min_duration_min != null ? fmtDur(item.min_duration_min) : "—";
+    const priceTxt = item.min_price2 != null ? "¥" + Math.round(item.min_price2) : "—";
+    const estP = item.price_est ? '<span class="est-tag">· 价估</span>' : "";
+    const tip = `直达 <b>${item.n_trains}</b> 趟/日 · 最快 <b>${durTxt}</b> · 二等 <b>${priceTxt}</b> 起${estP}`;
+    let pts = null, real = false;
+    if (item.route && item.route.length > 1) { pts = item.route; real = true; }
+    else pts = arcPoints(selFrom, c);
+    const tipHtml = real ? tip : tip + estTag;
+    drawPolyline(pts, {
+      color: isTo ? "#22d3ee" : "#3b82f6",
+      weight: isTo ? 3 : 1.4,
+      opacity: isTo ? 0.95 : (selTo ? 0.32 : 0.5),
+      lineCap: "round", interactive: true
+    }, tipHtml);
+  }
+}
+/* 回退：无矩阵数据时全部画估算弧线 */
+function drawEstimateArcs() {
+  for (const c of CITIES) {
+    if (c.name === selFrom.name) continue;
+    if ((c.tier || 3) > 2) continue;          // 未查到数据时只画主要城市，防满屏弧线
+    const est = estimate(selFrom, c);
+    const tip = `直距 ${Math.round(haversine(selFrom, c))} km ×1.25 ≈ 铁路 <b>${Math.round(est.railKm)}</b> km · 约 <b>${fmtDurCN(est.hours * 60)}</b> · 二等座 ≈ <b>¥${Math.round(est.price2)}</b>${estTag}`;
+    const isTo = selTo && !selTo.isStation && c.name === selTo.name;
+    drawPolyline(arcPoints(selFrom, c), {
+      color: isTo ? "#22d3ee" : "#3b82f6",
+      weight: isTo ? 2.6 : 1.1,
+      opacity: isTo ? 0.95 : (selTo ? 0.18 : 0.34),
+      lineCap: "round", interactive: true
+    }, tip);
+  }
+}
+
+/* ============ 小站点（/api/stations）—— 地图上常显（P2，与 tab 无关） ============ */
+function cityNearby(st) {
+  // 与城市点距离 <0.1°（约 11km）视为重合区（同名主站等）
+  for (const c of CITIES) {
+    const d = Math.hypot(st.lat - c.lat, st.lng - c.lng);
+    if (d < 0.1) return c;
+  }
+  return null;
+}
+function sameMainStation(stName, cityName) {
+  return stName === cityName || stName === cityName + "站" || stName.startsWith(cityName);
+}
+
+function renderStations() {
+  stationLayer.clearLayers();
+  pathLayer.clearLayers();
+  Object.keys(stMarkers).forEach(k => delete stMarkers[k]);
+  if (!selFrom || !stationsData) return;
+
+  // 1) 真实铁路走向线（穿过小站；>300km 跳段自动断开）
+  for (const p of (stationsData.paths || [])) {
+    if (!p.pts || p.pts.length < 2) continue;
+    const tip = `经停走向 · <b>${(p.codes || []).slice(0, 3).join(" / ")}</b>`;
+    drawPolyline(p.pts, {
+      color: "#3b82f6", weight: 1.3, opacity: selTo ? 0.28 : 0.5,
+      lineCap: "round", interactive: true, _layer: pathLayer
+    }, tip);
+  }
+
+  // 2) 小站点：全部画上（与 tab 无关）；重合规则：同名主站不画点，近城异名不画 label
+  for (const st of (stationsData.stations || [])) {
+    if (st.lat == null || st.lng == null) continue;   // 无坐标无法上图（仍在列表里）
+    const near = cityNearby(st);
+    if (near && sameMainStation(st.station, near.name)) continue;  // 与城市点重合：不单独画
+    const noLabel = !!near;                            // 近城异名：隐藏 label（防与城市 label 重叠）
+    const icon = L.divIcon({
+      className: "st-icon",
+      html: `<div class="st-wrap" data-st="${st.station}"><span class="st-dot"></span><span class="st-lbl">${st.station}</span></div>`,
+      iconSize: [10, 10], iconAnchor: [3.5, 5]   // 恒等于 .st-dot 盒(7px)中心，缩放不挪中心
+    });
+    const m = L.marker(gj([st.lat, st.lng]), { icon, riseOnHover: true, title: st.station }).addTo(stationLayer);
+    const dur = st.min_duration_min != null ? fmtDur(st.min_duration_min) : "—";
+    const pr = st.min_price2 != null ? "¥" + Math.round(st.min_price2) : "—";
+    m.bindTooltip(`<b>${st.station}</b>${st.city ? " · " + st.city : ""} · 最快 <b>${dur}</b> · 二等 <b>${pr}</b>${st.price_est !== false ? "（估）" : ""} · ${st.n_trains} 趟/日`,
+      { className: "arc-tip", direction: "top", offset: [0, -6] });
+    m.on("click", () => onStationClick(st));
+    stMarkers[st.station] = { marker: m, noLabel, st };
+  }
+
+  // 重要度分级（网络图审美：全景看全网细节，近景只看关键节点）
+  const ranked = Object.values(stMarkers).sort((a, b) => stationScore(b.st) - stationScore(a.st));
+  ranked.forEach((o, i) => { o.rank = i; });
+  stTop20 = Math.max(1, Math.ceil(ranked.length * 0.2));
+  stTop60 = Math.max(stTop20, Math.ceil(ranked.length * 0.6));
+  applyZoomRules();
+  refreshMarkerStyles();
+}
+
+/* 省会/直辖市（31 个省级行政区） */
+const CAPITALS = new Set(["北京","天津","上海","重庆","石家庄","太原","呼和浩特","沈阳","长春","哈尔滨","南京","杭州","合肥","福州","南昌","济南","郑州","武汉","长沙","广州","南宁","海口","成都","贵阳","昆明","拉萨","西安","兰州","西宁","银川","乌鲁木齐"]);
+/* 站点重要度分：省会/直辖市 + 城市tier + 日均趟数(log) + 城市主站加成 */
+function stationScore(st) {
+  const city = st.city && CITY_MAP[st.city];
+  let s = 0;
+  if (CAPITALS.has(st.city)) s += 40;
+  if (city) s += city.tier === 1 ? 30 : city.tier === 2 ? 18 : 8;
+  s += Math.min(30, Math.log2((st.n_trains || 0) + 1) * 6);
+  if (st.city && sameMainStation(st.station, st.city)) s += 12;
+  return s;
+}
+
+/* 缩放分级显隐（方向：越放大越只留重要站，越缩小越显全网细节）：
+   z>=7 只显重要度前 ~20%（省会+大枢纽）；5<=z<7 显 ~60%；z<5 全显。
+   选中目的地站始终显示。CSS 淡入淡出，不移除 DOM、不闪烁 */
+function applyZoomRules() {
+  const z = map.getZoom();
+  const nShow = z >= 7 ? stTop20 : z >= 5 ? stTop60 : Infinity;
+  const showLbl = z >= 7 && z < 8;   // label：7≤zoom<8 显示（再做碰撞避让），悬浮始终可显
+  for (const [name, o] of Object.entries(stMarkers)) {
+    const el = o.marker.getElement();
+    if (!el) continue;
+    const wrap = el.querySelector(".st-wrap");
+    if (!wrap) continue;
+    const isTo = !!(selTo && selTo.isStation && selTo.name === name);
+    const visible = isTo || (o.rank || 0) < nShow;
+    wrap.classList.toggle("st-off", !visible);
+    wrap.classList.toggle("show-lbl", visible && showLbl && !o.noLabel);
+  }
+  if (showLbl) avoidLabelCollision();
+}
+
+/* label 碰撞避让：城市 label 优先，重叠的小站 label 收起 */
+function avoidLabelCollision() {
+  const placed = [];
+  for (const c of CITIES) {
+    if (!labelCity(c)) continue;
+    const p = map.latLngToContainerPoint(gj([c.lat, c.lng]));
+    placed.push([p.x + 4, p.y - 8, p.x + 4 + 26 + c.name.length * 12, p.y + 8]);
+  }
+  const sts = Object.values(stMarkers)
+    .filter(o => !o.noLabel && o.st.lat != null)
+    .sort((a, b) => (b.st.n_trains || 0) - (a.st.n_trains || 0));
+  for (const o of sts) {
+    const el = o.marker.getElement();
+    if (!el) continue;
+    const wrap = el.querySelector(".st-wrap");
+    if (!wrap || !wrap.classList.contains("show-lbl")) continue;
+    const p = map.latLngToContainerPoint(gj([o.st.lat, o.st.lng]));
+    const box = [p.x + 2, p.y - 7, p.x + 2 + 12 + o.st.station.length * 11, p.y + 7];
+    const hit = placed.some(b => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1]);
+    if (hit) {
+      wrap.classList.remove("show-lbl");
+    } else {
+      placed.push(box);
+    }
+  }
+}
+map.on("zoomend", applyZoomRules);
+map.on("moveend", () => {
+  const z = map.getZoom();
+  if (z >= 7 && z < 8) avoidLabelCollision();
+});
+
+/* A-B 高亮真实折线（经停全序列；缺经停数据才回退弧线并标估算） */
+function drawPairHighlight() {
+  pairLayer.clearLayers();
+  if (!selFrom || !selTo) return;
+  const estArc = () => {
+    const tip = `估算走向${estTag}`;
+    drawPolyline(arcPoints(selFrom, selTo), { color: "#22d3ee", weight: 3, opacity: 0.85, lineCap: "round", _layer: pairLayer }, tip);
+  };
+  if (selTo.isStation) {
+    const st = selTo.st;
+    const train = st && st.trains && st.trains[0];
+    if (train && train.code) {
+      const q = new URLSearchParams({
+        from: selFrom.name, to: selTo.name,
+        train: train.code, date: dateInput.value || tomorrow()
+      });
+      fetch("api/route?" + q.toString())
+        .then(r => r.json())
+        .then(d => {
+          if (d.route && d.route.length > 1 && selTo && selTo.isStation && selTo.name === q.get("to")) {
+            drawPolyline(d.route, { color: "#22d3ee", weight: 4, opacity: 0.95, lineCap: "round", _layer: pairLayer });
+          } else if (selTo && selTo.isStation && selTo.name === q.get("to")) {
+            estArc();
+          }
+        })
+        .catch(() => {});
+    } else {
+      estArc();
+    }
+    return;
+  }
+  const item = directItem(selTo.name);
+  if (item && item.route && item.route.length > 1 && item.route_complete !== false) {
+    drawPolyline(item.route, { color: "#22d3ee", weight: 4, opacity: 0.95, lineCap: "round", _layer: pairLayer });
+    return;
+  }
+  // 没有缓存折线 → 问 /api/route（选中直达对时补取）；缺经停数据才回退估算弧线
+  if (item && item.has_direct && item.fastest) {
+    const q = new URLSearchParams({
+      from: item.fastest.from_st || selFrom.name,
+      to: item.fastest.to_st || selTo.name,
+      train: item.fastest.code, date: dateInput.value || tomorrow()
+    });
+    fetch("api/route?" + q.toString())
+      .then(r => r.json())
+      .then(d => {
+        if (d.route && d.route.length > 1 && selTo && selTo.name === q.get("to") && !d.estimated) {
+          drawPolyline(d.route, { color: "#22d3ee", weight: 4, opacity: 0.95, lineCap: "round", _layer: pairLayer });
+        } else if (selTo && selTo.name === q.get("to")) {
+          estArc();
+        }
+      })
+      .catch(() => {});
+  } else {
+    estArc();
+  }
+}
+
+/* ============ 可直达城市/站点列表 ============ */
+function renderDirectList() {
+  const box = document.getElementById("directBox");
+  const list = document.getElementById("dbList");
+  if (!selFrom || (!directData && !stationsData)) { box.classList.remove("show"); return; }
+  box.classList.add("show");
+
+  const stations = (stationsData && stationsData.stations) || [];
+  document.getElementById("dbStCount").textContent = stations.length ? "(" + stations.length + "站)" : "";
+  document.getElementById("dbUnit").textContent = listMode === "station" ? "站" : "城";
+
+  // 经停库建设进度可见
+  const scan = document.getElementById("dbScan");
+  const prog = (stationsData && stationsData.progress) || (directData && directData.progress);
+  if (prog && prog.done + (prog.failed || 0) < prog.total) {
+    scan.style.display = "flex";
+    document.getElementById("dbScanTxt").textContent =
+      `全国经停库建设中 ${prog.done}/${prog.total}` + (prog.eta_min ? `（约剩 ${Math.round(prog.eta_min / 60)} 小时）` : "");
+    if (!progTimer) {
+      progTimer = setInterval(() => {
+        fetch("api/graph?progress=1").then(r => r.json()).then(d => {
+          if (!d.progress) return;
+          if (stationsData) stationsData.progress = d.progress;
+          if (directData) directData.progress = d.progress;
+          renderDirectList();
+          if (d.progress.done >= d.progress.total && progTimer) {
+            clearInterval(progTimer); progTimer = null;
+            fetchStations();   // 建库完成 → 刷新站点
+          }
+        }).catch(() => {});
+      }, 30000);
+    }
+  } else {
+    scan.style.display = "none";
+    if (progTimer) { clearInterval(progTimer); progTimer = null; }
+  }
+
+  if (listMode === "station") {
+    const items = stations.slice().sort((a, b) =>
+      (a.min_duration_min ?? 1e9) - (b.min_duration_min ?? 1e9));
+    document.getElementById("dbCount").textContent = items.length;
+    document.getElementById("dbNote").textContent = prog && prog.done + (prog.failed || 0) < prog.total ? `· 建库中` : "";
+    list.innerHTML = items.map(x => {
+      const dur = x.min_duration_min != null ? fmtDur(x.min_duration_min) : "—";
+      const pr = x.min_price2 != null ? "¥" + Math.round(x.min_price2) : "—" + (x.price_est !== false ? '<span class="est">估</span>' : "");
+      return `<div class="db-item" data-st="${x.station}">
+        <span class="nm st-nm">${x.station}</span>
+        <span class="info">${x.city ? x.city + " · " : ""}<span class="fast">${dur}</span> · <span class="pr">${pr}</span>${x.price_est !== false ? '<span class="est">估</span>' : ""} · ${x.n_trains}趟/日</span>
+      </div>`;
+    }).join("");
+    list.querySelectorAll(".db-item[data-st]").forEach(el => {
+      el.addEventListener("click", () => {
+        const st = stations.find(s => s.station === el.dataset.st);
+        if (st) onStationClick(st);
+      });
+    });
+    return;
+  }
+
+  // 城市模式（tab 只控列表，不影响地图小站点）
+  const items = ((directData && directData.cities) || []).slice().sort((a, b) => {
+    if (a.pending !== b.pending) return a.pending ? 1 : -1;
+    if ((a.has_direct ? 0 : 1) !== (b.has_direct ? 0 : 1)) return a.has_direct ? -1 : 1;
+    return (a.min_duration_min ?? 1e9) - (b.min_duration_min ?? 1e9);
+  });
+  const nDirect = items.filter(x => x.has_direct).length;
+  document.getElementById("dbCount").textContent = nDirect;
+  const nPending = items.filter(x => x.pending).length;
+  document.getElementById("dbNote").textContent = nPending ? `· ${nPending} 个查询中` : "";
+  list.innerHTML = items.map(x => {
+    if (x.pending) return `<div class="db-item pending"><span class="nm">${x.city}</span><span class="info">查询中…</span></div>`;
+    if (!x.has_direct) return "";   // 无直达的不上列表（点线上不了）
+    const dur = x.min_duration_min != null ? fmtDur(x.min_duration_min) : "—";
+    const pr = x.min_price2 != null ? "¥" + Math.round(x.min_price2) : "—";
+    return `<div class="db-item" data-city="${x.city}">
+      <span class="nm">${x.city}</span>
+      <span class="info"><span class="fast">${dur}</span> · <span class="pr">${pr}</span>${x.price_est !== false ? '<span class="est">估</span>' : ""} · ${x.n_trains}趟/日</span>
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".db-item[data-city]").forEach(el => {
+    el.addEventListener("click", () => {
+      const c = CITY_MAP[el.dataset.city];
+      if (c) onCityClick(c);
+    });
+  });
+}
+
+/* 列表模式切换（只切换列表内容，小站点地图常显） */
+document.getElementById("tabCities").addEventListener("click", () => setListMode("city"));
+document.getElementById("tabStations").addEventListener("click", () => setListMode("station"));
+function setListMode(mode) {
+  listMode = mode;
+  document.getElementById("tabCities").classList.toggle("active", mode === "city");
+  document.getElementById("tabStations").classList.toggle("active", mode === "station");
+  renderDirectList();
+}
+
+/* ============ 直达矩阵拉取 ============ */
+function fetchDirect() {
+  if (!selFrom) return;
+  const fromName = selFrom.name;
+  fetch("api/direct?from=" + encodeURIComponent(fromName))
+    .then(r => r.json())
+    .then(data => {
+      if (!selFrom || selFrom.name !== fromName) return;
+      directData = data;
+      drawLines(); renderDirectList(); refreshMarkerStyles(); updateHint();
+      if (selTo) drawPairHighlight();
+      // 有待查对 → 3s 轮询刷新
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      if (data.pending_count > 0) {
+        pollTimer = setTimeout(fetchDirect, 3000);
+      }
+    })
+    .catch(() => {
+      // 矩阵接口不可用 → 回退估算弧线；并 4s 后重试一次拿真数据
+      directData = null; drawLines(); renderDirectList(); refreshMarkerStyles();
+      if (selFrom && selFrom.name === fromName && !pollTimer) {
+        pollTimer = setTimeout(fetchDirect, 4000);
+      }
+    });
+}
+
+/* ============ 可直达全站拉取（含小站） ============ */
+function fetchStations() {
+  if (!selFrom) return;
+  const fromName = selFrom.name;
+  fetch("api/stations?from=" + encodeURIComponent(fromName))
+    .then(r => r.json())
+    .then(data => {
+      if (!selFrom || selFrom.name !== fromName) return;
+      stationsData = data;
+      renderStations(); renderDirectList();
+      // 经停扫描未完成 → 轮询刷新直到完成
+      if (stPollTimer) { clearTimeout(stPollTimer); stPollTimer = null; }
+      const prog = data.progress || { done: 0, total: 0 };
+      if (prog.done + (prog.failed || 0) < prog.total) {
+        stPollTimer = setTimeout(fetchStations, 6000);
+      }
+      updateHint();
+    })
+    .catch(() => {
+      // 响应中途断连等异常 → 4s 后自动重试，避免永久卡在半截状态
+      if (selFrom && selFrom.name === fromName && !stPollTimer) {
+        stPollTimer = setTimeout(fetchStations, 4000);
+      }
+    });
+}
+function updateHint() {
+  if (!selFrom) return;
+  const nCity = directData ? `<b>${directData.cities.filter(x => x.has_direct).length}</b> 城 / ` : "城市数据加载中… ";
+  const nSt = stationsData ? `<b>${(stationsData.stations || []).length}</b> 站` : "站点加载中…";
+  const prog = stationsData && stationsData.progress;
+  const scanning = prog && prog.done + (prog.failed || 0) < prog.total ? `（全国经停库建设中 ${prog.done}/${prog.total}）` : "";
+  document.getElementById("hint").innerHTML =
+    `已选出发地 <b>${selFrom.name}</b> — 可直达 ${nCity}${nSt}${scanning}，再点一个城市或小站查真实车次/中转方案`;
+}
+
+/* ============ 点击城市 ============ */
+function onCityClick(c) {
+  if (!selFrom || (selFrom && selTo)) {
+    selFrom = c; selTo = null;
+    directData = null; stationsData = null; transferPlans = null;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    if (stPollTimer) { clearTimeout(stPollTimer); stPollTimer = null; }
+    lineLayer.clearLayers(); pairLayer.clearLayers();
+    stationLayer.clearLayers(); pathLayer.clearLayers();
+    Object.keys(stMarkers).forEach(k => delete stMarkers[k]);
+    drawEstimateArcs(); refreshMarkerStyles();
+    document.getElementById("hint").innerHTML = `正在查询 <b>${c.name}</b> 的真实可直达城市/站点…`;
+    closePanel();
+    fetchDirect();
+    fetchStations();
+    return;
+  }
+  if (c.name === selFrom.name) {
+    selFrom = null; directData = null; stationsData = null;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    if (stPollTimer) { clearTimeout(stPollTimer); stPollTimer = null; }
+    lineLayer.clearLayers(); pairLayer.clearLayers();
+    stationLayer.clearLayers(); pathLayer.clearLayers();
+    Object.keys(stMarkers).forEach(k => delete stMarkers[k]);
+    renderDirectList(); refreshMarkerStyles();
+    document.getElementById("hint").innerHTML = '点一个城市作为<b>出发地</b>，查看<b>真实可直达城市/站点</b>，再点目的地查看 <b>12306 实时方案</b>';
+    return;
+  }
+  selTo = c;
+  drawLines(); refreshMarkerStyles(); drawPairHighlight();
+  openPanel();
+}
+
+/* ============ 点击小站 ============ */
+function onStationClick(st) {
+  if (!selFrom || st.station === selFrom.name) return;
+  selTo = { name: st.station, lat: st.lat, lng: st.lng, isStation: true, city: st.city, st };
+  transferPlans = null;
+  drawLines(); refreshMarkerStyles(); drawPairHighlight();
+  openPanel();
+}
+
+/* ============ 面板 ============ */
+const panel = document.getElementById("panel");
+const pBody = document.getElementById("pBody");
+const dateInput = document.getElementById("dateInput");
+
+function tomorrow() {
+  const d = new Date(); d.setDate(d.getDate() + 1);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+dateInput.value = tomorrow();
+
+function syncZoomOffset() {
+  // P3：面板/抽屉打开时，缩放控件让位（桌面右移、手机上移），绝不遮挡
+  const isOpen = panel.classList.contains("open");
+  map.getContainer().classList.toggle("panel-open", isOpen);
+  if (isOpen && window.innerWidth <= 720) {
+    const h = panel.getBoundingClientRect().height;
+    map.getContainer().style.setProperty("--zoom-lift", Math.max(0, Math.round(h - 90)) + "px");
+  } else {
+    map.getContainer().style.setProperty("--zoom-lift", "0px");
+  }
+}
+// 抽屉高度随内容变化（异步渲染），实时跟随
+if (window.ResizeObserver) {
+  new ResizeObserver(() => syncZoomOffset()).observe(panel);
+}
+
+function openPanel() {
+  document.getElementById("pFrom").textContent = selFrom.name;
+  document.getElementById("pTo").textContent = selTo.isStation
+    ? selTo.name + (selTo.city && selTo.city !== selTo.name ? "（" + selTo.city + "）" : "")
+    : selTo.name;
+  panel.classList.add("open");
+  // 把 A-B 视野收进左半屏，避免连线藏在面板底下
+  try {
+    const b = L.latLngBounds([gj([selFrom.lat, selFrom.lng]), gj([selTo.lat, selTo.lng])]);
+    map.fitBounds(b, { paddingTopLeft: [50, 90], paddingBottomRight: [470, 60], maxZoom: 7 });
+  } catch (e) {}
+  // 换向：目的地是小站时不支持（矩阵只覆盖城市）
+  document.getElementById("btnSwap").disabled = !!selTo.isStation;
+  syncZoomOffset();
+  setTimeout(syncZoomOffset, 350);   // 过渡结束后再校一次（不依赖 rAF/RO）
+  renderAndQuery();
+}
+function closePanel() {
+  panel.classList.remove("open");
+  syncZoomOffset();
+}
+document.getElementById("btnClose").addEventListener("click", () => {
+  closePanel();
+  selTo = null; transferPlans = null;
+  drawLines(); renderStations(); refreshMarkerStyles(); pairLayer.clearLayers();
+});
+document.getElementById("btnSwap").addEventListener("click", () => {
+  if (!selFrom || !selTo || selTo.isStation) return;
+  [selFrom, selTo] = [selTo, selFrom];
+  document.getElementById("pFrom").textContent = selFrom.name;
+  document.getElementById("pTo").textContent = selTo.name;
+  directData = null; stationsData = null; transferPlans = null;
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  if (stPollTimer) { clearTimeout(stPollTimer); stPollTimer = null; }
+  lineLayer.clearLayers(); pairLayer.clearLayers();
+  stationLayer.clearLayers(); pathLayer.clearLayers();
+  Object.keys(stMarkers).forEach(k => delete stMarkers[k]);
+  drawEstimateArcs(); refreshMarkerStyles();
+  fetchDirect();
+  fetchStations();
+  renderAndQuery();
+});
+dateInput.addEventListener("change", () => { transferPlans = null; renderAndQuery(); });
+window.addEventListener("resize", () => { syncZoomOffset(); scheduleCityDraw(); });
+
+/* 估算卡片已移除（真实数据优先）；仅"完全没数据且查询失败"时给一行轻量估算提示 */
+
+/* 到达站过滤：只留目的城市主站（城市名本身或 城市名+东/南/西/北/站/虹桥） */
+function isMainStation(toName, cityName) {
+  if (toName === cityName) return true;
+  if (!toName.startsWith(cityName)) return false;
+  const rest = toName.slice(cityName.length);
+  return /^([东南西北](站)?)$/.test(rest) || rest === "站" || rest === "虹桥";
+}
+
+/* ============ 查询与渲染 ============ */
+let lastResult = null;     // 最近一次接口返回
+let showAllStations = false;
+let sortKey = "depart", sortAsc = true;
+
+function pairHasDirect() {
+  const item = directItem(selTo && selTo.name);
+  return !!(item && item.has_direct);
+}
+function pairIsPending() {
+  const item = directItem(selTo && selTo.name);
+  return !!(item && item.pending);
+}
+
+function renderAndQuery() {
+  if (!selFrom || !selTo) return;
+  // 矩阵明确无直达 → 直接走中转（小站目的地不在矩阵里，跳过该判断）
+  if (!selTo.isStation && directData && !pairIsPending() && !pairHasDirect()) {
+    return renderTransfer();
+  }
+  transferPlans = null;
+  pBody.innerHTML = `<div class="status-box"><div class="spinner"></div>正在查询 12306 实时车次…（首次约 20-40 秒，请稍候）</div>`;
+  const q = new URLSearchParams({ from: selFrom.name, to: selTo.name, date: dateInput.value || tomorrow() });
+  fetch("api/query?" + q.toString())
+    .then(r => r.json())
+    .then(data => {
+      lastResult = data;
+      // 查到 0 趟直达 且 矩阵不确定 → 也走中转
+      if (!data.error && (!data.trains || !data.trains.length) && directData) {
+        return renderTransfer();
+      }
+      renderResult();
+    })
+    .catch(() => {
+      lastResult = { trains: [], error: "网络错误，无法连接查询服务" };
+      renderResult();
+    });
+}
+
+function seatClass(status) {
+  if (/无票/.test(status)) return "st-no";
+  if (/剩余/.test(status)) return "st-few";
+  return "st-ok";
+}
+
+function renderResult() {
+  const data = lastResult || { trains: [], error: "无数据" };
+  let trains = data.trains || [];
+  const cityName = selTo.name;
+  // 小站目的地：目的地本身就是指定站，到站过滤自动关掉
+  const stationDest = !!selTo.isStation;
+  const filtered = (stationDest || showAllStations) ? trains : trains.filter(t => isMainStation(t.to_station, cityName));
+
+  const price2 = t => {
+    const s = t.seats && (t.seats["二等座"] || t.seats["二等座重联"]);
+    return s ? s.price : null;
+  };
+
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (sortKey === "depart") { va = a.depart; vb = b.depart; }
+    else if (sortKey === "duration") { va = a.duration_min; vb = b.duration_min; }
+    else { va = price2(a); vb = price2(b); if (va == null) va = Infinity; if (vb == null) vb = Infinity; }
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  let html = "";
+
+  if (data.error) {
+    // 完全没数据且查询失败：只给一句轻量估算提示（估算卡已移除）
+    html += `<div class="status-box err">查询失败：${data.error}<br><br>可更换日期或稍后重试</div>`;
+    html += `<div class="sub">直线距离约 ${Math.round(haversine(selFrom, selTo))} km（仅粗略估算，无真实数据）</div>`;
+    pBody.innerHTML = html;
+    return;
+  }
+  if (!trains.length) {
+    // 无直达 → 转乘
+    return renderTransfer();
+  }
+
+  // 汇总
+  const n = filtered.length;
+  const fastest = Math.min(...filtered.map(t => t.duration_min));
+  const prices = filtered.map(price2).filter(p => p != null);
+  const priceRange = prices.length ? (prices.length > 1 && Math.min(...prices) !== Math.max(...prices)
+      ? `¥${Math.min(...prices)} ~ ¥${Math.max(...prices)}` : `¥${prices[0]}`) : "—";
+  const fh = Math.floor(fastest / 60), fm = fastest % 60;
+
+  html += `<div class="summary">
+    <span>共 <b>${n}</b> 趟</span><span>·</span>
+    <span>最快 <b>${fh}h${String(fm).padStart(2, "0")}m</b></span><span>·</span>
+    <span>二等座 <b>${priceRange}</b></span>
+  </div>`;
+
+  if (!stationDest) {
+    html += `<label class="filter-row"><input type="checkbox" id="ckAll" ${showAllStations ? "checked" : ""}> 显示全部到站（含小站/其他站，共 ${trains.length} 趟）</label>`;
+  }
+
+  const ind = k => sortKey === k ? `<span class="sort-ind">${sortAsc ? "▲" : "▼"}</span>` : "";
+  html += `<table><thead><tr>
+    <th data-k="code">车次</th>
+    <th data-k="depart">出发 → 到达 ${ind("depart")}</th>
+    <th data-k="duration">历时 ${ind("duration")}</th>
+    <th data-k="price">二等座 / 一等座 ${ind("price")}</th>
+  </tr></thead><tbody>`;
+
+  for (const t of filtered) {
+    const s2 = t.seats && (t.seats["二等座"] || t.seats["二等座重联"]);
+    const s1 = t.seats && (t.seats["一等座"] || t.seats["一等座重联"]);
+    const seatTxt = (s, label) => s
+      ? `<div class="seat-line"><span class="${seatClass(s.status)}">${label} ${s.status}</span> <span class="price">¥${s.price}</span></div>`
+      : `<div class="seat-line"><span class="st-no">${label} —</span></div>`;
+    const dh = Math.floor(t.duration_min / 60), dm = t.duration_min % 60;
+    html += `<tr>
+      <td><span class="train-code">${t.code}</span></td>
+      <td>
+        <div class="time-big">${t.depart} → ${t.arrive}</div>
+        <div class="sub">${t.from_station} → ${t.to_station}</div>
+      </td>
+      <td><div class="time-big">${dh}h${String(dm).padStart(2, "0")}</div></td>
+      <td>${seatTxt(s2, "二等")}${seatTxt(s1, "一等")}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  if (data.raw_warnings && data.raw_warnings.length) {
+    html += `<div class="sub" style="margin-top:10px">提示：${data.raw_warnings.length} 行数据未能解析，已跳过。</div>`;
+  }
+  pBody.innerHTML = html;
+  syncZoomOffset();
+
+  // 事件绑定
+  const ck = document.getElementById("ckAll");
+  if (ck) ck.addEventListener("change", e => { showAllStations = e.target.checked; renderResult(); });
+  pBody.querySelectorAll("thead th").forEach(th => {
+    th.addEventListener("click", () => {
+      const k = th.dataset.k;
+      if (k === "code") return;
+      if (sortKey === k) sortAsc = !sortAsc; else { sortKey = k; sortAsc = true; }
+      renderResult();
+    });
+  });
+}
+
+/* ============ 中转方案 ============ */
+function renderTransfer() {
+  const fromN = selFrom.name, toN = selTo.name;
+  pBody.innerHTML = `<div class="status-box"><div class="spinner"></div>无直达车次，正在查询中转方案…</div>`;
+  const q = new URLSearchParams({ from: fromN, to: toN, date: dateInput.value || tomorrow() });
+  fetch("api/transfer?" + q.toString())
+    .then(r => r.json())
+    .then(data => {
+      if (!selFrom || !selTo || selFrom.name !== fromN || selTo.name !== toN) return;
+      transferPlans = data;
+      renderTransferResult();
+    })
+    .catch(() => {
+      transferPlans = { from: fromN, to: toN, by_time: [], by_price: [], error: "网络错误" };
+      renderTransferResult();
+    });
+}
+
+function tfCard(p, idx) {
+  const legsHtml = p.legs.map((l, i) => {
+    const dur = l.duration_min != null ? fmtDur(l.duration_min) : "";
+    const pr = l.price2 != null ? `¥${l.price2}${l.price_est ? "（估）" : ""}` : "—";
+    const mid = i === 1
+      ? `<div class="tf-mid">⇄ 中转 <span class="hub">${p.transfer_station && p.transfer_station !== p.transfer_city ? p.transfer_station + "（" + (p.transfer_city || "同城") + "）" : (p.transfer_city || "同城")}</span> · 等待 <b>${p.wait_min != null ? fmtDurCN(p.wait_min) : "—"}</b></div>`
+      : "";
+    return mid + `<div class="tf-leg">
+      <span class="train-code">${l.code}</span>
+      <span class="tm">${l.depart} → ${l.arrive}</span>
+      <span class="stn">${l.from_st} → ${l.to_st}</span>
+      <span class="stn">${dur} · ${pr}</span>
+    </div>`;
+  }).join("");
+  const tt = p.total_min != null ? fmtDur(p.total_min) : "—";
+  const tp = p.total_price != null ? `¥${Math.round(p.total_price)}` : "—";
+  return `<div class="tf-card">
+    <div class="tf-top"><span>方案 ${idx + 1}</span><span class="total-t">全程 ${tt}</span><span class="total-p">${tp}</span></div>
+    ${legsHtml}
+  </div>`;
+}
+
+function renderTransferResult() {
+  const d = transferPlans || { by_time: [], by_price: [] };
+  let html = "";
+  const nAll = Math.max((d.by_time || []).length, (d.by_price || []).length);
+  if (!nAll) {
+    html += d.rate_limited
+      ? `<div class="status-box err">${d.message || "12306 限流中，请稍后再试"}<br><br>可稍后重试，或换日期。</div>`
+      : d.error
+        ? `<div class="status-box err">查询失败：${d.error}<br><br>可稍后重试，或换日期。</div>
+           <div class="sub">直线距离约 ${Math.round(haversine(selFrom, selTo))} km（仅粗略估算，无真实数据）</div>`
+        : `<div class="status-box">未找到 ${selFrom.name} → ${selTo.name} 的可行中转方案。<br>可尝试换日期，或分段查询。</div>`;
+    pBody.innerHTML = html;
+    syncZoomOffset();
+    return;
+  }
+  const list = transferTab === "price" ? d.by_price : d.by_time;
+  const note = (d.source === "official" || d.source === "official-cached") ? "（12306 官方中转换乘）"
+    : d.source === "live" ? "（实时枢纽补查，仅供参考）"
+    : d.source === "graph" ? "（全国经停图谱自算，任意站可中转）"
+    : d.source === "matrix" ? "（基于直达矩阵自算，仅供参考）" : "";
+  const rlNote = d.rate_limited ? `<div class="status-box err" style="padding:12px">${d.message || "12306 限流中，请稍后再试"}</div>` : "";
+  html += `<div class="summary">
+    <span>无直达，推荐 <b>${nAll}</b> 个中转方案 ${note}</span>
+  </div>` + rlNote;
+  html += `<div class="tf-tabs">
+    <div class="tf-tab ${transferTab === "time" ? "active" : ""}" data-tab="time">⏱ 按时间</div>
+    <div class="tf-tab ${transferTab === "price" ? "active" : ""}" data-tab="price">💰 按性价比</div>
+  </div>`;
+  html += list.map((p, i) => tfCard(p, i)).join("");
+  pBody.innerHTML = html;
+  syncZoomOffset();
+  pBody.querySelectorAll(".tf-tab").forEach(el => {
+    el.addEventListener("click", () => { transferTab = el.dataset.tab; renderTransferResult(); });
+  });
+}
+
+/* ============ 初始化：拉城市 -> 画点/走廊 ============ */
+fetch("api/cities")
+  .then(r => r.json())
+  .then(cs => {
+    CITIES = (cs || []).filter(c => c.lat != null && c.lng != null);
+    CITY_MAP = Object.fromEntries(CITIES.map(c => [c.name, c]));
+    drawCorridors();
+    scheduleCityDraw();
+  })
+  .catch(() => {});
+
+/* 初始样式刷新 */
+setTimeout(() => { refreshMarkerStyles(); applyZoomRules(); syncZoomOffset(); }, 300);
+</script>
+</body>
+</html>
