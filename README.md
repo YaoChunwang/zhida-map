@@ -1,4 +1,4 @@
-# 🚄 高铁火车可选路线图（railmap）
+# 🚄 直达地图（zhida-map）· P人的说走就走出行地图
 
 一个可交互的全国高铁/火车路线图 Web 应用：**点城市作为出发地，即可看到真实可直达的城市与站点**（按真实铁路走向绘制折线，不是直线连），再点目的地查看 **12306 实时车次、票价与官方换乘方案**。
 
@@ -23,11 +23,11 @@
 环境要求：Python 3.9+（Web 服务本身零第三方依赖，纯标准库）。
 
 ```bash
-git clone https://github.com/YaoChunwang/railmap.git
-cd railmap
+git clone https://github.com/YaoChunwang/zhida-map.git
+cd zhida-map
 
 # 1) 下载数据包（必须，约 38 MB）
-git clone https://github.com/YaoChunwang/railmap-data.git data
+git clone https://github.com/YaoChunwang/zhida-map-data.git data
 
 # 2) 配置（可选，不配也能跑）
 cp config.example.json config.json
@@ -72,7 +72,7 @@ cp config.example.json config.json
 **方式一（推荐）：从数据仓库下载**
 
 ```bash
-git clone https://github.com/YaoChunwang/railmap-data.git data
+git clone https://github.com/YaoChunwang/zhida-map-data.git data
 ```
 
 **方式二：自己重建**
@@ -85,12 +85,12 @@ python3 build_matrix.py       # 城市对直达矩阵（建议挂每日凌晨定
 
 > ⚠️ 抓取全程带限流退避（触发反爬后按 5→10→20→30 分钟指数退避封顶），请勿并发跑多个抓取任务，否则可能被 12306 封接口。
 
-数据文件的详细说明见 [railmap-data 仓库](https://github.com/YaoChunwang/railmap-data)。
+数据文件的详细说明见 [zhida-map-data 仓库](https://github.com/YaoChunwang/zhida-map-data)。
 
 ## 架构简述
 
 ```
-railmap/
+zhida-map/
 ├── server.py            # 纯标准库 HTTP 服务（ThreadingHTTPServer + IPv6 双栈）
 │                        #   GET /                -> static/index.html
 │                        #   GET /api/query       -> 12306 实时车次查询
@@ -107,7 +107,7 @@ railmap/
 ├── railconfig.py        # config.json 加载
 ├── config.example.json  # 配置模板
 ├── static/              # 前端（Leaflet，免 key 高德瓦片底图，API 走相对路径）
-└── data/                # 数据包（来自 railmap-data 仓库，git 忽略）
+└── data/                # 数据包（来自 zhida-map-data 仓库，git 忽略）
 ```
 
 数据流：`fetch_allroutes.py` 抓经停库 → `build_matrix.py` 汇总城市对直达信息 → `server.py` 运行期按需实时查询并写缓存（`cache/`、`pricecache.json` 等）→ 前端渲染真实走向与方案。
